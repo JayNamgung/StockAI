@@ -29,4 +29,16 @@ def lambda_handler(event, context):
                 sleep(2)
                 services = client.describe_services(cluster=cluster, services=[service_name])
 
-                for item 
+                for item in services.get("services"):
+                    service = SimpleNamespace(**item)
+                    if service.serviceName == service_name:
+                        has_running_tasks = service.runningCount > 0
+
+                logger.info(f"Has running tasks: {has_running_tasks}")
+            logger.info(f"All Tasks have been rebooted")
+    else:
+        logger.warning(f"No Tasks to reboot in {cluster}, {service_name}")
+
+
+if __name__ == "__main__":
+    lambda_handler(None, None)
