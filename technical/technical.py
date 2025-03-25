@@ -1,8 +1,5 @@
 """
 각종 기술적 지표를 분석하기 위한 함수
-
-작성: 장준호
-수정: 윤성준
 """
 
 from typing import Literal
@@ -1207,4 +1204,109 @@ def _identify_patterns(df: DataFrame, window=10):
                    patterns[date].append(("Side-by-Side White Lines", strength))
            
            # Separating Lines
-           # TODO : technical.py 1122 라인 이후 재작업
+           if (
+              abs(current["open_price"] - prev["open_price"]) / prev["open_price"]
+           ):
+              if (
+               current["close_price"] > current["open_price"]
+               and prev["close_price"] < prev["open_price"]
+              ):
+               strength = (current["close_price"] - current["open_price"]) / current[
+                "open_price"
+               ]
+               patterns[date].append(("Bullish Separating Lines", strength))
+              elif (
+               current["close_price"] < current["open_price"]
+               and prev["close_price"] > prev["open_price"]
+              ):
+               strength = (current["open_price"] - current["close_price"]) / current[
+                "open_price"
+               ]
+               patterns[date].append(("Bearish Separating Lines", strength))
+
+           # Thrust Pattern
+           if i > 1:
+              if (
+                  prev2["close_price"] < prev["low_price"]
+                  and current["open_price"] > prev["high_price"]
+                  and current["close_price"] < prev["close_price"]
+                  ):
+                  strength = (prev["close_price"] - current["close_price"]) / prev[
+                            "close_price"
+                        ]
+                  patterns[date].append(("Bearish Thrust", strength))
+              elif (
+                  prev2["close_price"] > prev["high_price"]
+                  and current["open_price"] < prev["low_price"]
+                  and current["close_price"] > prev["close_price"]
+                  ):
+                  strength = (current["close_price"] - prev["close_price"]) / prev[
+                            "close_price"
+                        ]
+                  patterns[date].append(("Bullish Thrust", strength))
+
+           # Mat Hold
+           if i > 3:
+            if (
+                df["open_price"].iloc[i - 4] < df["close_price"].iloc[i - 4]
+                and df["close_price"].iloc[i - 3] < df["open_price"].iloc[i - 3]
+                and df["open_price"].iloc[i - 3] > df["close_price"].iloc[i]
+                and all(
+                    df["close_price"].iloc[j] < df["open_price"].iloc[j]
+                    for j in range(i - 3, i)
+                )
+                and all(
+                    df["low_price"].iloc[j] > df["low_price"].iloc[i - 4]
+                    for j in range(i - 3, i)
+                )
+                and current["close_price"] > df["high_price"].iloc[i - 4]
+            ):
+                strength = (current["close_price"] - df["low_price"].iloc[i - 4]) / df["low_price"].iloc[i - 4]
+                patterns[date].append(("Bullish Mat Hold", strength))
+
+            # Stick Sandwich
+            if i > 1:
+                if (
+                    prev2["close_price"] < prev2["open_price"]
+                    and prev["close_price"] > prev["open_price"]
+                    and abs(prev2["close_price"] - prev2["open_price"]) / prev2["close_price"] > PRICE_PRECISION
+                    and current["close_price"] < current["open_price"]
+                ):
+                    strength = (prev2["open_price"] - current["close_price"]) / current["close_price"]
+                    patterns[date].append(("Bearish Stick Sandwich", strength))
+
+            # Potential Bullish Reversal
+            if i >= 3:  # 최소 4개의 캔들을 필요로 한다
+                last_3_candles = df.iloc[i - 3: i]
+                if (
+                    all(last_3_candles["close_price"] < last_3_candles["open_price"])
+                    and current["close_price"] > current["open_price"]
+                ):
+                    reversal_strength = (
+                        current["close_price"] - current["open_price"]
+                    ) / current["ATR"]
+                    patterns[date].append(("Potential Bullish Reversal", min(1, reversal_strength)))
+
+            return patterns
+
+def _calculate_pattern_strength(df: DataFrame, idx: int, pattern_type: str):
+    current = df.iloc[idx]
+
+    # 캔들 크기
+    candle_size = abs(current["close_price"] - current["open_price"]) / current["ATR"]
+
+    # 거래량 증가
+    volume_increase = min(current["volume"] / current["volume_MA"], 3)
+
+    # 추세 반전
+    trend_reversal = 1
+    if any([
+        pattern_type.startswith("Bullish") and current["close_price"] > current["MA"] > df["MA"].iloc[idx - 5],
+        pattern_type.startswith("Bearish") and current["close_price"] < current["MA"] < df["MA"].iloc[idx - 5]
+    ]):
+        trend_reversal = 2
+
+    # 종합 강도 계산
+    strength = candle_size * 0.4 + volume_increase * 0.3 + trend_reversal * 0.3  # 최대 강도는 1로 제한
+
+    return min(strength, 1)
