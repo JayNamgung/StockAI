@@ -1,0 +1,7 @@
+{
+    "mock_data":{
+        "ttl": 3600,
+        "description": "가상 데이터",
+        "alias": "mock_data"
+    }
+}
