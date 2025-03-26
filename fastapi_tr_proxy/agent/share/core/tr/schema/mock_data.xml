@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="EUC-KR"?>
+<Input iName="">
+    <I Name="userId" Align="Left" Desc="사용자ID"/>
+</Input>
+<Output oName="">
+    <O Name="filler" Align="Left" Desc="Filler"/>
+    <O Name="userId" Align="Left" Desc="사용자ID"/>
+    <O Name="name" Align="Left" Desc="이름"/>
+    <O Name="age" Align="Right" Desc="나이"/>
+    <O Name="email" Align="Left" Desc="이메일"/>
+</Output>

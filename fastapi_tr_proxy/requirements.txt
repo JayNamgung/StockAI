@@ -2,10 +2,6 @@ fastapi==0.104.0
 uvicorn==0.23.2
 pydantic==2.4.2
 httpx==0.24.1
-python-multipart==0.0.6
-aiocache==0.12.1
 apscheduler==3.10.4
+python-multipart==0.0.6
 python-dotenv==1.0.0
-boto3==1.28.64
-orjson==3.9.10
-cachetools==5.3.1
