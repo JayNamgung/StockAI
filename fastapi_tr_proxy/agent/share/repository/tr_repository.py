@@ -9,10 +9,11 @@ import hashlib
 from typing import Dict, Any, Optional, List, Callable
 import asyncio
 from functools import wraps
+import time
 
 logger = logging.getLogger(__name__)
 
-# 캐시 TTL 정의 (Spring의 CacheConfig.Caches enum에 해당)
+# 캐시 TTL 정의
 CACHE_TTL_MAP = {
     "cache2Sec": 2,
     "cache3Sec": 3,
@@ -115,46 +116,40 @@ class TrRepository:
         else:
             return "cache30Sec"  # 기본 캐시 (Spring 구현과 일치)
     
-    def cached(self, tr_code: str, ttl: int):
+    async def get_cached_data(self, tr_code: str, params: Dict[str, Any], ttl: int, data_loader: Callable) -> Dict[str, Any]:
         """
-        TR 요청 결과를 캐싱하는 데코레이터
-        Spring의 @Cacheable 어노테이션에 해당
+        캐시된 데이터를 반환하거나 새로운 데이터를 가져와 캐싱하는 메서드
         
         Args:
             tr_code: TR 코드
+            params: TR 요청 매개변수
             ttl: 캐시 TTL (초 단위)
+            data_loader: 데이터를 가져오는 콜백 함수
             
         Returns:
-            Callable: 데코레이터 함수
+            Dict[str, Any]: TR 응답 데이터
         """
-        def decorator(func):
-            @wraps(func)
-            async def wrapper(self_obj, params: Dict[str, Any], continue_key: Optional[str] = None, *args, **kwargs):
-                # 캐시 키 생성
-                cache_key = self._generate_cache_key(tr_code, params, continue_key)
-                
-                # 현재 시간
-                current_time = asyncio.get_event_loop().time()
-                
-                # 캐시에서 결과 확인
-                if cache_key in self.cache and (cache_key not in self.cache_expiry or self.cache_expiry[cache_key] > current_time):
-                    logger.debug(f"캐시에서 TR 데이터 반환: {tr_code}")
-                    return self.cache[cache_key]
-                
-                # 함수 실행
-                result = await func(self_obj, params, continue_key, *args, **kwargs)
-                
-                # 결과 캐싱
-                self.cache[cache_key] = result
-                self.cache_expiry[cache_key] = current_time + ttl
-                
-                logger.debug(f"TR 데이터 캐싱: {tr_code}, TTL: {ttl}초")
-                
-                return result
-            
-            return wrapper
-            
-        return decorator
+        # 캐시 키 생성
+        cache_key = self._generate_cache_key(tr_code, params)
+        
+        # 현재 시간
+        current_time = time.time()
+        
+        # 캐시에서 결과 확인
+        if cache_key in self.cache and (cache_key not in self.cache_expiry or self.cache_expiry[cache_key] > current_time):
+            logger.debug(f"캐시에서 TR 데이터 반환: {tr_code}")
+            return self.cache[cache_key]
+        
+        # 데이터 로더 함수 실행
+        result = await data_loader()
+        
+        # 결과 캐싱
+        self.cache[cache_key] = result
+        self.cache_expiry[cache_key] = current_time + ttl
+        
+        logger.debug(f"TR 데이터 캐싱: {tr_code}, TTL: {ttl}초")
+        
+        return result
     
     async def evict_cache(self, cache_name: Optional[str] = None):
         """
@@ -164,7 +159,7 @@ class TrRepository:
             cache_name: 초기화할 캐시 이름 (지정하지 않으면 모든 캐시 초기화)
         """
         # 현재 시간
-        current_time = asyncio.get_event_loop().time()
+        current_time = time.time()
         
         # 삭제할 캐시 키 목록
         keys_to_delete = []

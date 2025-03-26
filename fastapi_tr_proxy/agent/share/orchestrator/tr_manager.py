@@ -132,47 +132,35 @@ class TrManager:
         
         # 캐싱 정책에 따라 적절한 메서드 호출
         if tr_code in not_evict_tr_codes:
-            # 캐싱 데코레이터를 활용한 메서드 호출
-            return await self._get_tr_data_cached(tr_code, params, continue_key, 86400)  # 24시간 캐싱
+            # 캐싱 처리 (데코레이터 사용 대신 직접 캐싱 로직 호출)
+            return await self.tr_repository.get_cached_data(
+                tr_code, params, 86400, 
+                lambda: self.tr_impl.request(tr_code, params, continue_key))
         else:
             if ttl >= 28800:
-                return await self._get_tr_data_cached(tr_code, params, continue_key, 28800)  # 8시간 캐싱
+                ttl_value = 28800
             elif ttl >= 3600:
-                return await self._get_tr_data_cached(tr_code, params, continue_key, 3600)  # 1시간 캐싱
+                ttl_value = 3600
             elif ttl >= 1800:
-                return await self._get_tr_data_cached(tr_code, params, continue_key, 1800)  # 30분 캐싱
+                ttl_value = 1800
             elif ttl >= 600:
-                return await self._get_tr_data_cached(tr_code, params, continue_key, 600)   # 10분 캐싱
+                ttl_value = 600
             elif ttl >= 60:
-                return await self._get_tr_data_cached(tr_code, params, continue_key, 60)    # 60초 캐싱
+                ttl_value = 60
             elif ttl >= 30:
-                return await self._get_tr_data_cached(tr_code, params, continue_key, 30)    # 30초 캐싱
+                ttl_value = 30
             elif ttl >= 10:
-                return await self._get_tr_data_cached(tr_code, params, continue_key, 10)    # 10초 캐싱
+                ttl_value = 10
             elif ttl >= 3:
-                return await self._get_tr_data_cached(tr_code, params, continue_key, 3)     # 3초 캐싱
+                ttl_value = 3
             elif ttl >= 2:
-                return await self._get_tr_data_cached(tr_code, params, continue_key, 2)     # 2초 캐싱
+                ttl_value = 2
             elif ttl == 0:
                 logger.info(f"TR 코드: {tr_code}는 캐싱하지 않음")
                 return await self.tr_impl.request(tr_code, params, continue_key)
             else:
-                return await self._get_tr_data_cached(tr_code, params, continue_key, 30)    # 기본 30초 캐싱
-    
-    @TrRepository.cached("dynamic", 0)  # TTL은 런타임에 결정됨
-    async def _get_tr_data_cached(self, tr_code: str, params: Dict[str, Any], continue_key: Optional[str] = None, ttl: int = 30) -> Dict[str, Any]:
-        """
-        캐싱을 적용한 TR 데이터 요청 메서드
-        캐시 데코레이터가 적용되어 결과를 캐싱
-        
-        Args:
-            tr_code: TR 코드
-            params: TR 요청 매개변수
-            continue_key: 연속 조회 키 (옵션)
-            ttl: 캐시 TTL (초 단위)
+                ttl_value = 30
             
-        Returns:
-            Dict[str, Any]: TR 응답 데이터
-        """
-        logger.debug(f"{ttl}초 캐싱 적용: {tr_code}")
-        return await self.tr_impl.request(tr_code, params, continue_key)
+            return await self.tr_repository.get_cached_data(
+                tr_code, params, ttl_value, 
+                lambda: self.tr_impl.request(tr_code, params, continue_key))
