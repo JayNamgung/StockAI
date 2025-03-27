@@ -1,67 +1,84 @@
-"""
-TR 저장소 모듈
-TR 데이터의 캐싱 및 저장을 담당
-"""
-
+from typing import AsyncGenerator, Dict, Any, Optional, List
 import logging
 import json
-import hashlib
-from typing import Dict, Any, Optional, List, Callable
-import asyncio
-from functools import wraps
 import time
+import asyncio
+from fastapi import Request, Depends
+
+from agent.share.core.interface.tr_interface import TrInterface
 
 logger = logging.getLogger(__name__)
 
-# 캐시 TTL 정의
-CACHE_TTL_MAP = {
-    "cache2Sec": 2,
-    "cache3Sec": 3,
-    "cache10Sec": 10,
-    "cache30Sec": 30,
-    "cache60Sec": 60,
-    "cache10Min": 600,
-    "cache30Min": 1800,
-    "cache1Hour": 3600,
-    "cache8Hour": 28800,
-    "cache24HourWithoutEvict": 86400,
-}
-
 class TrRepository:
     """
-    TR 저장소 클래스
-    TR 데이터의 캐싱 및 조회를 담당
+    TR 데이터 저장소
+    TR 요청 및 캐싱을 관리
     """
     
-    def __init__(self):
+    def __init__(self, tr: TrInterface):
         """
         TR 저장소 초기화
-        캐시 및 필요한 리소스 초기화
-        """
-        # 메모리 캐시 (TR 코드 + 매개변수로 구성된 키 -> 응답 데이터)
-        self.cache = {}
         
-        # 캐시 만료 시간 (TR 코드 + 매개변수로 구성된 키 -> 만료 시간)
+        Args:
+            tr: TR 인터페이스 구현체
+        """
+        self.tr = tr
+        
+        # 캐시 저장소
+        self.cache = {}
         self.cache_expiry = {}
         
-        # 삭제 제외 TR 코드 목록
-        self.not_evict_tr_codes = []
+        # 캐시 삭제 제외 TR 코드 목록
+        self.not_evict_tr_codes = tr.get_not_evict_tr_codes()
         
         logger.info("TR 저장소 초기화 완료")
     
-    def set_not_evict_tr_codes(self, codes: List[str]):
+    async def request_tr(
+        self, tr_code: str, params: Dict[str, Any], continue_key: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
-        캐시 삭제 대상에서 제외할 TR 코드 목록을 설정
+        TR 요청을 실행하고 결과를 반환
         
         Args:
-            codes: 캐시 삭제 제외 TR 코드 목록
+            tr_code: TR 코드
+            params: TR 요청 매개변수
+            continue_key: 연속 조회 키 (옵션)
+            
+        Returns:
+            Dict[str, Any]: TR 응답 데이터
         """
-        self.not_evict_tr_codes = codes
-        logger.info(f"캐시 삭제 제외 TR 코드 설정: {codes}")
+        # 캐시 키 생성
+        cache_key = self._generate_cache_key(tr_code, params, continue_key)
+        
+        # 캐시 TTL 결정
+        ttl = self.tr.get_cache_ttl(tr_code)
+        
+        # 연속 조회는 캐싱하지 않음
+        if continue_key:
+            return await self.tr.request_tr(tr_code, params, continue_key)
+        
+        # 캐시 확인
+        current_time = time.time()
+        if cache_key in self.cache and current_time < self.cache_expiry.get(cache_key, 0):
+            logger.debug(f"캐시에서 TR 데이터 반환: {tr_code}")
+            return self.cache[cache_key]
+        
+        # TR 요청 실행
+        result = await self.tr.request_tr(tr_code, params, continue_key)
+        
+        # 캐싱 (캐시 삭제 제외 TR 코드 또는 TTL > 0인 경우)
+        if tr_code in self.not_evict_tr_codes or ttl > 0:
+            self.cache[cache_key] = result
+            self.cache_expiry[cache_key] = current_time + ttl
+            logger.debug(f"TR 데이터 캐싱: {tr_code}, TTL: {ttl}초")
+        
+        return result
     
-    def _generate_cache_key(self, tr_code: str, params: Dict[str, Any], continue_key: Optional[str] = None) -> str:
+    def _generate_cache_key(
+        self, tr_code: str, params: Dict[str, Any], continue_key: Optional[str] = None
+    ) -> str:
         """
-        캐시 키를 생성하는 내부 메서드
+        캐시 키를 생성
         
         Args:
             tr_code: TR 코드
@@ -74,130 +91,56 @@ class TrRepository:
         # 매개변수를 정렬하여 일관된 키 생성
         sorted_params = dict(sorted(params.items()))
         
-        # 매개변수와 연속 조회 키를 포함한 문자열 생성
+        # TR 코드와 매개변수를 포함한 키 생성
         key_str = f"{tr_code}_{json.dumps(sorted_params)}"
+        
+        # 연속 조회 키가 있으면 포함
         if continue_key:
             key_str += f"_{continue_key}"
         
-        # SHA-256 해시를 사용하여 일관된 길이의 키 생성
-        return hashlib.sha256(key_str.encode()).hexdigest()
+        return key_str
     
-    def get_cache_name_by_ttl(self, ttl: int) -> str:
+    async def evict_cache(self, tr_code: Optional[str] = None):
         """
-        TTL 값에 해당하는 캐시 이름을 반환
+        캐시를 초기화
         
         Args:
-            ttl: TTL 값 (초 단위)
-            
-        Returns:
-            str: 캐시 이름
+            tr_code: 초기화할 TR 코드 (None이면 모든 캐시 초기화)
         """
-        # TTL 값에 가장 가까운 캐시 이름 찾기
-        if ttl >= 86400:
-            return "cache24HourWithoutEvict"
-        elif ttl >= 28800:
-            return "cache8Hour"
-        elif ttl >= 3600:
-            return "cache1Hour"
-        elif ttl >= 1800:
-            return "cache30Min"
-        elif ttl >= 600:
-            return "cache10Min"
-        elif ttl >= 60:
-            return "cache60Sec"
-        elif ttl >= 30:
-            return "cache30Sec"
-        elif ttl >= 10:
-            return "cache10Sec"
-        elif ttl >= 3:
-            return "cache3Sec"
-        elif ttl >= 2:
-            return "cache2Sec"
+        if tr_code:
+            # 특정 TR 코드 캐시만 초기화
+            keys_to_delete = []
+            for key in self.cache.keys():
+                if key.startswith(f"{tr_code}_"):
+                    keys_to_delete.append(key)
+            
+            for key in keys_to_delete:
+                if key in self.cache:
+                    del self.cache[key]
+                if key in self.cache_expiry:
+                    del self.cache_expiry[key]
+            
+            logger.info(f"TR {tr_code} 캐시 초기화 완료: {len(keys_to_delete)}개 항목")
         else:
-            return "cache30Sec"  # 기본 캐시 (Spring 구현과 일치)
-    
-    async def get_cached_data(self, tr_code: str, params: Dict[str, Any], ttl: int, data_loader: Callable) -> Dict[str, Any]:
-        """
-        캐시된 데이터를 반환하거나 새로운 데이터를 가져와 캐싱하는 메서드
-        
-        Args:
-            tr_code: TR 코드
-            params: TR 요청 매개변수
-            ttl: 캐시 TTL (초 단위)
-            data_loader: 데이터를 가져오는 콜백 함수
+            # 캐시 삭제 제외 TR 코드를 제외한 모든 캐시 초기화
+            keys_to_delete = []
+            for key in list(self.cache.keys()):
+                is_excluded = any(key.startswith(f"{code}_") for code in self.not_evict_tr_codes)
+                if not is_excluded:
+                    keys_to_delete.append(key)
             
-        Returns:
-            Dict[str, Any]: TR 응답 데이터
-        """
-        # 캐시 키 생성
-        cache_key = self._generate_cache_key(tr_code, params)
-        
-        # 현재 시간
-        current_time = time.time()
-        
-        # 캐시에서 결과 확인
-        if cache_key in self.cache and (cache_key not in self.cache_expiry or self.cache_expiry[cache_key] > current_time):
-            logger.debug(f"캐시에서 TR 데이터 반환: {tr_code}")
-            return self.cache[cache_key]
-        
-        # 데이터 로더 함수 실행
-        result = await data_loader()
-        
-        # 결과 캐싱
-        self.cache[cache_key] = result
-        self.cache_expiry[cache_key] = current_time + ttl
-        
-        logger.debug(f"TR 데이터 캐싱: {tr_code}, TTL: {ttl}초")
-        
-        return result
-    
-    async def evict_cache(self, cache_name: Optional[str] = None):
-        """
-        캐시를 초기화하는 메서드
-        
-        Args:
-            cache_name: 초기화할 캐시 이름 (지정하지 않으면 모든 캐시 초기화)
-        """
-        # 현재 시간
-        current_time = time.time()
-        
-        # 삭제할 캐시 키 목록
-        keys_to_delete = []
-        
-        # 만료된 캐시 항목 찾기
-        for key, expiry_time in self.cache_expiry.items():
-            if expiry_time <= current_time:
-                keys_to_delete.append(key)
-        
-        # 만료된 캐시 항목 삭제
-        for key in keys_to_delete:
-            if key in self.cache:
-                del self.cache[key]
-            if key in self.cache_expiry:
-                del self.cache_expiry[key]
-        
-        logger.info(f"캐시 초기화 완료: {len(keys_to_delete)}개 항목 삭제")
+            for key in keys_to_delete:
+                if key in self.cache:
+                    del self.cache[key]
+                if key in self.cache_expiry:
+                    del self.cache_expiry[key]
+            
+            logger.info(f"모든 캐시 초기화 완료: {len(keys_to_delete)}개 항목")
     
     async def evict_all_caches_at_intervals(self):
         """
-        주기적으로 모든 캐시를 초기화하는 메서드
-        Spring의 @Scheduled(cron = "0 0 8 * * ?") 메서드에 해당
+        주기적으로 모든 캐시를 초기화
         """
-        logger.info("모든 캐시 초기화 시작")
-        
-        # 삭제 제외 TR 코드를 제외한 모든 캐시 초기화
-        keys_to_delete = []
-        for key in list(self.cache.keys()):
-            # TR 코드가 삭제 제외 목록에 없으면 삭제
-            is_excluded = any(not_evict_code in key for not_evict_code in self.not_evict_tr_codes)
-            if not is_excluded:
-                keys_to_delete.append(key)
-        
-        # 캐시 항목 삭제
-        for key in keys_to_delete:
-            if key in self.cache:
-                del self.cache[key]
-            if key in self.cache_expiry:
-                del self.cache_expiry[key]
-        
-        logger.info(f"모든 캐시 초기화 완료: {len(keys_to_delete)}개 항목 삭제")
+        logger.info("주기적 캐시 초기화 시작")
+        await self.evict_cache()
+        logger.info("주기적 캐시 초기화 완료")

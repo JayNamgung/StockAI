@@ -1,6 +1,6 @@
 # TR Proxy FastAPI 서비스
 
-Spring Boot으로 작성된 TR Proxy 서비스를 FastAPI로 마이그레이션한 프로젝트입니다.
+Spring Boot으로 작성된 KB증권 TR 프록시 서비스를 FastAPI로 마이그레이션한 프로젝트입니다.
 
 ## 마이그레이션 개요
 
@@ -24,65 +24,74 @@ Spring Boot으로 작성된 TR Proxy 서비스를 FastAPI로 마이그레이션�
    - `agent/share/repository`: 데이터 저장소
    - `agent/share/orchestrator`: 서비스 조율
 
+### 주요 기능 구현
+
+1. **TR 인터페이스 (TrInterface)**
+   - 모든 TR 구현체가 따라야 하는 추상 인터페이스
+   - TR 요청, 캐시 TTL 관리 기능 정의
+
+2. **KB증권 TR 구현 (KbsecTr)**
+   - KB증권 TR 요청 처리 구현
+   - Py4J를 통한 Java 라이브러리 연동
+   - 로컬/개발 환경 분기 처리
+
+3. **TR 저장소 (TrRepository)**
+   - TR 데이터 캐싱 및 관리
+   - 다양한 TTL 정책 지원
+   - 캐시 데코레이터 제공
+
+4. **TR 관리자 (TrManager)**
+   - TR 요청 실행 및 캐싱 조율
+   - 스케줄링 기능 제공
+   - 캐시 초기화 관리
+
+## 프로젝트 구조
+agent/
+├── share/
+│   ├── core/
+│   │   ├── interface/
+│   │   │   └── tr_interface.py     # TR 인터페이스 정의
+│   │   └── tr/
+│   │       ├── tr_kbsec.py         # KB증권 TR 구현
+│   │       ├── driver/             # JAR 파일 디렉토리
+│   │       │   ├── JKASS_v4.jar    # KB증권 KASS 라이브러리
+│   │       │   └── ... (기타 JAR 파일들)
+│   │       └── schema/             # TR 스키마 파일
+│   ├── repository/
+│   │   └── tr_repository.py        # TR 데이터 저장소
+│   └── orchestrator/
+│       └── tr_manager.py           # TR 관리 및 조율
+├── main.py                        # FastAPI 애플리케이션
+└── requirements.txt               # 패키지 의존성
+
 ## 변환 방식 요약
 
 1. **계층 분리**:
-   - Spring Boot의 컨트롤러/서비스/저장소 계층을 명확히 분리하여 FastAPI 애플리케이션에 적용
    - 인터페이스와 구현체 분리로 확장성 확보
+   - 관심사 분리를 통한 코드 유지보수성 향상
 
 2. **비동기 처리**:
-   - FastAPI의 비동기 기능을 활용하여 효율적인 요청 처리
-   - `async/await` 패턴으로 블로킹 없는 처리 구현
+   - FastAPI의 비동기 기능을 활용한 효율적인 요청 처리
+   - Java 라이브러리 호출은 별도 스레드 풀에서 실행
 
 3. **캐싱 메커니즘**:
-   - Spring의 `@Cacheable` → 사용자 정의 캐시 데코레이터로 구현
-   - 다양한 TTL 정책 지원
+   - 인메모리 캐싱으로 반복 요청 최적화
+   - TR 코드별 다양한 TTL 정책 지원
 
 4. **스케줄링**:
-   - Spring의 `@Scheduled` → APScheduler로 구현
-   - 캐시 초기화 등의 주기적 작업 관리
+   - APScheduler를 활용한 주기적 작업 관리
+   - 매일 오전 8시 캐시 초기화 작업 수행
 
-5. **예외 처리**:
-   - Spring의 `@ExceptionHandler` → FastAPI 예외 핸들러로 구현
-   - 일관된 오류 응답 형식 제공
-
-6. **설정 관리**:
-   - Spring의 외부 설정 → JSON 파일 및 환경 변수로 관리
-   - 구성 가능한 캐시 정책 지원
-
-### 주요 기능 구현
-
-#### 1. TR 인터페이스 (TrInterface)
-- 모든 TR 구현체가 따라야 하는 추상 인터페이스
-- TR 요청, 스키마 조회, 캐시 TTL 관리 기능 정의
-
-#### 2. KB증권 TR 구현 (KbsecTr)
-- KB증권 TR 요청 처리 구현
-- 스키마 파싱 및 캐시 설정 관리
-- 목업 데이터 제공 (실제 구현 시 KASS 라이브러리로 교체 필요)
-
-#### 3. TR 저장소 (TrRepository)
-- TR 데이터 캐싱 및 관리
-- 다양한 TTL 정책 지원
-- 캐시 데코레이터 제공
-
-#### 4. TR 관리자 (TrManager)
-- TR 요청 실행 및 캐싱 조율
-- 스케줄링 기능 제공
-- 캐시 초기화 관리
-
-#### 5. FastAPI 애플리케이션
-- API 엔드포인트 정의
-- 예외 처리 및 미들웨어
-- 애플리케이션 수명 주기 관리
+5. **로컬/개발 환경 분리**:
+   - 로컬: 목 데이터 반환으로 개발 편의성 제공
+   - 개발: Py4J를 통한 실제 KB증권 서버 통신
 
 ## 설치 및 실행
 
 ### 필수 요구사항
 - Python 3.9 이상
-- FastAPI
-- Uvicorn
-- APScheduler
+- Java 8 이상 (개발 환경에서 필요)
+- KB증권 KASS 라이브러리 JAR 파일 (개발 환경에서 필요)
 
 ### 환경 설정
 ```bash
@@ -97,3 +106,23 @@ source venv/bin/activate
 
 # 의존성 설치
 pip install -r requirements.txt
+
+# 개발 모드로 실행
+uvicorn agent.main:app --reload
+
+# 프로덕션 모드로 실행
+uvicorn agent.main:app --host 0.0.0.0 --port 8000
+
+### API 테스트
+# 헬스 체크
+curl http://localhost:8000/
+
+# TR 코드로 데이터 요청
+curl -X POST http://localhost:8000/proxy/api/kb/IVCA0060 \
+  -H "Content-Type: application/json" \
+  -d '{"dataBody": {"indTypCd": "001"}}'
+
+# 별칭으로 데이터 요청
+curl -X POST http://localhost:8000/v1.0/ksv/spec/index_info \
+  -H "Content-Type: application/json" \
+  -d '{"dataBody": {"indTypCd": "001"}}'

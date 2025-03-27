@@ -6,12 +6,12 @@
     },
     "IVCA0060": {
         "ttl": 600,
-        "description": "인덱스 정보",
+        "description": "지수 정보",
         "alias": "index_info"
     },
     "KBI50130": {
         "ttl": 86400,
-        "description": "삭제 제외 테스트 데이터",
-        "alias": "no_evict_test"
+        "description": "캐시 삭제 제외 데이터",
+        "alias": "no_evict_data"
     }
 }

@@ -7,9 +7,9 @@ import os
 import json
 import logging
 import xml.etree.ElementTree as ET
-from typing import Dict, Any, Optional, List, Tuple
-from pathlib import Path
+from typing import Dict, Any, Optional, List
 import asyncio
+from py4j.java_gateway import JavaGateway, GatewayParameters, launch_gateway, CallbackServerParameters
 
 from agent.share.core.interface.tr_interface import TrInterface
 
@@ -24,9 +24,10 @@ class KbsecTr(TrInterface):
     def __init__(self):
         """
         KB증권 TR 클래스 초기화
-        설정 파일 로드 및 필요한 초기화 수행
+        설정 로드 및 KASS 브리지 초기화
         """
-        self.channel_id = "3Aw"  # 채널 ID 설정
+        # 환경 설정 (.env 파일에서 로드)
+        self.environment = os.getenv("APP_ENV", "local")
         
         # 캐시 설정 로드
         self.tr_rules = self._load_cache_config()
@@ -38,44 +39,84 @@ class KbsecTr(TrInterface):
             if alias:
                 self.alias_mapping[alias] = key
         
+        # Java 게이트웨이 (실제 모드에서만 초기화)
+        self.gateway = None
+        if self.environment != "local":
+            self._init_gateway()
+        
+        # 채널 ID (.env 파일에서 로드)
+        self.channel_id = os.getenv("CHANNEL_ID", "3Aw")
+        
         # 스키마 캐시 초기화
         self.schema_cache = {}
         
-        logger.info(f"KB증권 TR 클래스 초기화 완료: {len(self.tr_rules)} TR 코드, {len(self.alias_mapping)} 별칭")
+        # 스키마 디렉토리
+        self.schema_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema")
+        
+        logger.info(f"KB증권 TR 클래스 초기화 완료: 환경={self.environment}, 채널ID={self.channel_id}")
     
     def _load_cache_config(self) -> Dict[str, Any]:
         """
-        캐시 설정 파일을 로드하는 메서드
+        캐시 설정 파일을 로드
         
         Returns:
             Dict[str, Any]: 캐시 설정 정보
         """
+        config_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "schema", "cache-config.json"
+        )
+        
         try:
-            config_path = os.getenv("CACHE_CONFIG_PATH", 
-                                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
-                                            "config", "cache-config.json"))
-            
-            with open(config_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-                
-        except FileNotFoundError:
-            logger.warning(f"캐시 설정 파일을 찾을 수 없습니다. 기본 설정을 사용합니다: {config_path}")
-            # 기본 설정 반환
-            return {
-                "mock_data": {
-                    "ttl": 3600,
-                    "description": "가상 데이터",
-                    "alias": "mock_data"
-                }
-            }
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            else:
+                logger.warning(f"캐시 설정 파일을 찾을 수 없음: {config_path}")
+                return {}
         except Exception as e:
             logger.error(f"캐시 설정 로드 중 오류 발생: {str(e)}", exc_info=True)
             return {}
     
-    async def request(self, tr_code: str, params: Dict[str, Any], continue_key: Optional[str] = None) -> Dict[str, Any]:
+    def _init_gateway(self):
+        """
+        Java 게이트웨이 초기화
+        KASS 라이브러리와 통신하기 위한 Py4J 게이트웨이 설정
+        """
+        try:
+            # 개발 환경에서만 실행
+            if self.environment == "local":
+                return
+            
+            # JAR 파일 디렉토리 (.env 파일에서 로드)
+            jar_dir = os.getenv("JAR_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "driver"))
+            
+            # JAR 파일 목록 구성
+            jar_files = []
+            if os.path.exists(jar_dir):
+                for file in os.listdir(jar_dir):
+                    if file.lower().endswith(".jar"):
+                        jar_files.append(os.path.join(jar_dir, file))
+            
+            if jar_files:
+                # 클래스패스 구성
+                classpath = os.pathsep.join(jar_files)
+                
+                # 게이트웨이 시작
+                port = launch_gateway(classpath=classpath, die_on_exit=True)
+                self.gateway = JavaGateway(gateway_parameters=GatewayParameters(port=port))
+                logger.info(f"Java 게이트웨이 초기화 완료: {len(jar_files)}개 JAR 파일 로드")
+            else:
+                logger.warning(f"JAR 파일을 찾을 수 없음: {jar_dir}")
+                
+        except Exception as e:
+            logger.error(f"Java 게이트웨이 초기화 중 오류 발생: {str(e)}", exc_info=True)
+    
+    async def request_tr(
+        self, tr_code: str, params: Dict[str, Any], continue_key: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         TR 요청을 수행하는 메서드
-        Spring Boot의 ProxyService.getTrData() 메서드에 해당
         
         Args:
             tr_code: TR 코드
@@ -85,53 +126,20 @@ class KbsecTr(TrInterface):
         Returns:
             Dict[str, Any]: TR 응답 데이터
         """
-        logger.info(f"[TR-{tr_code}] 요청")
+        logger.info(f"[TR-{tr_code}] 요청 시작")
         
-        try:
-            # 특수 케이스 처리 (IVCA0060)
-            if tr_code == "IVCA0060" and "indTypCd" in params:
-                ind_typ_cd = params.get("indTypCd")
-                logger.info(f"IVCA0060 호출: indTypCd는 {ind_typ_cd}")
-                
-                if ind_typ_cd == "001":
-                    params["indxId"] = "KG001P"
-                elif ind_typ_cd == "301":
-                    params["indxId"] = "OG001P"
-            
-            # 여기서는 실제 KASS 라이브러리 호출 대신 목업 응답을 사용
-            # 실제 구현에서는 KASS 라이브러리를 통해 TR 요청 처리
-            raw_response = await self._execute_tr_request(tr_code, params, continue_key)
-            
-            # 응답 가공
-            response = self._process_tr_response(raw_response)
-            
-            # 헤더 구성
-            header = {
-                "resultCode": "200",
-                "resultMessage": "정상",
-                "processFlag": "A",
-                "category": "API"
-            }
-            
-            if continue_key:
-                header["contKey"] = continue_key + "_next"
-            
-            # 최종 응답 구성
-            result = {
-                "dataHeader": header,
-                "dataBody": response
-            }
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"TR 요청 처리 중 오류 발생: {str(e)}", exc_info=True)
-            raise
+        if self.environment == "local":
+            # 로컬 환경(목 데이터)
+            return await self._mock_tr_request(tr_code, params, continue_key)
+        else:
+            # 개발/운영 환경(실제 통신)
+            return await self._real_tr_request(tr_code, params, continue_key)
     
-    async def _execute_tr_request(self, tr_code: str, params: Dict[str, Any], continue_key: Optional[str] = None) -> Dict[str, Any]:
+    async def _mock_tr_request(
+        self, tr_code: str, params: Dict[str, Any], continue_key: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
-        실제 TR 요청을 실행하는 내부 메서드
-        KASS 라이브러리를 통한 실제 TR 요청 처리를 담당
+        목 TR 요청 처리 (로컬 환경)
         
         Args:
             tr_code: TR 코드
@@ -139,156 +147,288 @@ class KbsecTr(TrInterface):
             continue_key: 연속 조회 키 (옵션)
             
         Returns:
-            Dict[str, Any]: TR 원시 응답 데이터
+            Dict[str, Any]: 목 TR 응답 데이터
         """
-        # TR 요청 처리 시간 시뮬레이션
+        # 응답 시간 시뮬레이션
         await asyncio.sleep(0.1)
         
-        # 헤더 정보 구성
-        header = {
-            "rsp_cd": "0000",
-            "rsp_msg": "정상처리되었습니다."
+        # 기본 응답 헤더
+        result = {
+            "dataHeader": {
+                "resultCode": "200",
+                "resultMessage": "정상",
+                "processFlag": "A",
+                "category": "API"
+            },
+            "dataBody": {}
         }
         
-        # TR 코드에 따른 목업 응답 생성
-        response = {
-            "TRX_HEADER": header
-        }
-        
-        # TR 코드별 목업 데이터 생성
-        if tr_code == "mock_data":
-            response["userData"] = {
-                "userId": params.get("userId", "unknown"),
-                "name": "홍길동",
-                "age": 30,
-                "email": "hong@example.com"
-            }
-        elif tr_code == "IVCA0060":
-            response["indxInfo"] = {
-                "indxId": params.get("indxId", ""),
-                "indxNm": "코스피 지수" if params.get("indxId") == "KG001P" else "해외 지수",
-                "indxVal": "2456.78",
-                "indxChg": "+12.34",
-                "indxChgRt": "+0.5%"
-            }
-        else:
-            # 기본 목업 데이터
-            response[f"{tr_code}_data"] = {
-                "result": "success",
-                "timestamp": "2025-03-26T10:30:00",
-                "requestParam": params
-            }
+        # 특수 TR 코드 처리
+        if tr_code == "IVCA0060":
+            # 지수 정보 TR
+            ind_typ_cd = params.get("indTypCd", "")
+            indx_id = "KG001P" if ind_typ_cd == "001" else "OG001P"
             
-            # 배열 데이터 예시
-            if tr_code.startswith("K"):
-                response["items"] = [
+            result["dataBody"] = {
+                "indxInfo": {
+                    "indxId": indx_id,
+                    "indxNm": "코스피 지수" if indx_id == "KG001P" else "해외 지수",
+                    "indxVal": "2456.78",
+                    "indxChg": "+12.34",
+                    "indxChgRt": "+0.5%"
+                }
+            }
+        elif tr_code.startswith("K"):
+            # 일반 정보 TR
+            result["dataBody"] = {
+                "items": [
                     {"item_id": "1", "item_name": "항목1", "value": "100"},
                     {"item_id": "2", "item_name": "항목2", "value": "200"},
                     {"item_id": "3", "item_name": "항목3", "value": "300"}
                 ]
+            }
+        else:
+            # 기본 목업 데이터
+            result["dataBody"] = {
+                "result": "success",
+                "timestamp": "2025-03-26T10:30:00",
+                "requestParam": params
+            }
         
-        return response
-    
-    def _process_tr_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        TR 응답을 가공하는 내부 메서드
-        Spring의 response 처리 로직에 해당
+        # 연속 조회 키가 있으면 반환
+        if continue_key:
+            result["dataHeader"]["contKey"] = continue_key + "_next"
         
-        Args:
-            response: TR 원시 응답 데이터
-            
-        Returns:
-            Dict[str, Any]: 가공된 TR 응답 데이터
-        """
-        result = {}
-        
-        # 응답 데이터 처리
-        for key, value in response.items():
-            # 특정 접두사를 가진 키는 제외
-            if not key.startswith("_") and not key.startswith("TRX_HEADER") and not key.startswith("filler"):
-                if isinstance(value, list):
-                    # 배열 처리
-                    array = []
-                    for item in value:
-                        if isinstance(item, dict):
-                            child = {}
-                            for child_key, child_value in item.items():
-                                if not child_key.startswith("_") and not child_key.startswith("TRX_HEADER") and not child_key.startswith("filler"):
-                                    child[child_key] = child_value
-                            array.append(child)
-                    result[key] = array
-                else:
-                    result[key] = value
-        
+        logger.info(f"[TR-{tr_code}] 목 응답 생성 완료")
         return result
     
-    async def get_schema(self, tr_code: str) -> Dict[str, Any]:
+    async def _real_tr_request(
+        self, tr_code: str, params: Dict[str, Any], continue_key: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
-        TR 스키마 정보를 반환하는 메서드
+        실제 TR 요청 처리 (개발/운영 환경)
         
         Args:
             tr_code: TR 코드
+            params: TR 요청 매개변수
+            continue_key: 연속 조회 키 (옵션)
             
         Returns:
-            Dict[str, Any]: TR 입출력 스키마 정보
+            Dict[str, Any]: 실제 TR 응답 데이터
         """
-        # 스키마 캐시에서 확인
-        if tr_code in self.schema_cache:
-            return self.schema_cache[tr_code]
-        
-        # 스키마 파일 경로
-        schema_path = os.path.join(os.path.dirname(__file__), "schema", f"{tr_code}.xml")
+        if not self.gateway:
+            logger.error("Java 게이트웨이가 초기화되지 않음")
+            raise Exception("Java 게이트웨이 초기화 필요")
         
         try:
-            # XML 파일 파싱
-            tree = ET.parse(schema_path)
-            root = tree.getroot()
+            # 비동기 실행 (별도 스레드에서 실행)
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, self._execute_java_tr_request, tr_code, params, continue_key
+            )
             
-            # 입력 스키마 구성
-            inputs = []
-            input_elem = root.find("Input")
-            if input_elem is not None:
-                for field in input_elem.findall("I"):
-                    inputs.append({
-                        "name": field.get("Name", ""),
-                        "align": field.get("Align", "Left"),
-                        "desc": field.get("Desc", "")
-                    })
+            logger.info(f"[TR-{tr_code}] 실제 응답 수신 완료")
+            return result
+        except Exception as e:
+            logger.error(f"TR 요청 처리 중 오류 발생: {str(e)}", exc_info=True)
+            return {
+                "dataHeader": {
+                    "resultCode": "500",
+                    "resultMessage": f"오류: {str(e)}",
+                    "processFlag": "E",
+                    "category": "API"
+                },
+                "dataBody": {}
+            }
+    
+    def _execute_java_tr_request(
+        self, tr_code: str, params: Dict[str, Any], continue_key: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Java 라이브러리를 통한 TR 요청 실행 (블로킹)
+        
+        Args:
+            tr_code: TR 코드
+            params: TR 요청 매개변수
+            continue_key: 연속 조회 키 (옵션)
             
-            # 출력 스키마 구성
-            outputs = []
-            output_elem = root.find("Output")
-            if output_elem is not None:
-                for field in output_elem.findall("O"):
-                    outputs.append({
-                        "name": field.get("Name", ""),
-                        "align": field.get("Align", "Left"),
-                        "desc": field.get("Desc", "")
-                    })
+        Returns:
+            Dict[str, Any]: TR 응답 데이터
+        """
+        try:
+            # HeaderWrap 생성
+            header_wrap = self.gateway.jvm.com.kbsec.kass.dib.protocol.HeaderWrap()
+            header_wrap.setChannelID(self.channel_id)
             
-            # 스키마 정보 구성
-            schema = {
-                "inputs": inputs,
-                "outputs": outputs
+            # 연속 조회 설정
+            if continue_key:
+                header_wrap.setCont_flag("Y")
+                header_wrap.setContkey_new(continue_key)
+            
+            # TrxRuleObject 생성
+            trx_rule = self.gateway.jvm.com.kbsec.kass.transaction.TrxRuleObject(f"Tkb_{tr_code}")
+            
+            # 요청 데이터를 Java Map으로 변환
+            java_map = self._dict_to_java_map(params)
+            
+            # IVCA0060 특수 처리
+            if tr_code == "IVCA0060" and "indTypCd" in params:
+                ind_typ_cd = params.get("indTypCd")
+                
+                if ind_typ_cd == "001":
+                    java_map.put("indxId", "KG001P")
+                elif ind_typ_cd == "301":
+                    java_map.put("indxId", "OG001P")
+            
+            # TR 요청 실행
+            result_code = trx_rule.rq(java_map, None, header_wrap)
+            
+            if result_code != 0:
+                raise Exception(f"TR 요청 실패: {result_code}")
+            
+            # 응답 처리
+            response = trx_rule.getResult().getOutput()
+            
+            # 응답 객체를 Python 딕셔너리로 변환
+            result = self._java_to_python(response)
+            
+            # 기본 응답 형식 구성
+            python_result = {
+                "dataHeader": {
+                    "resultCode": "200",
+                    "resultMessage": "정상",
+                    "processFlag": "A",
+                    "category": "API"
+                },
+                "dataBody": {}
             }
             
-            # 스키마 캐시에 저장
-            self.schema_cache[tr_code] = schema
+            # 응답 데이터 필터링 및 구성
+            for key, value in result.items():
+                if not key.startswith("_") and not key.startswith("TRX_HEADER") and not key.startswith("filler"):
+                    python_result["dataBody"][key] = value
             
-            return schema
+            # 연속 키 처리
+            if "TRX_HEADER" in result and "contKey" in result["TRX_HEADER"]:
+                python_result["dataHeader"]["contKey"] = result["TRX_HEADER"]["contKey"]
             
-        except FileNotFoundError:
-            logger.warning(f"스키마 파일을 찾을 수 없습니다: {schema_path}")
-            return {"inputs": [], "outputs": []}
+            return python_result
             
         except Exception as e:
-            logger.error(f"스키마 파싱 중 오류 발생: {str(e)}", exc_info=True)
-            return {"inputs": [], "outputs": []}
+            logger.error(f"Java TR 요청 실행 중 오류 발생: {str(e)}", exc_info=True)
+            raise
+    
+    def _dict_to_java_map(self, data: Dict[str, Any]) -> Any:
+        """
+        Python 딕셔너리를 Java HashMap으로 변환
+        
+        Args:
+            data: Python 딕셔너리
+            
+        Returns:
+            Any: Java HashMap 객체
+        """
+        java_map = self.gateway.jvm.java.util.HashMap()
+        
+        for key, value in data.items():
+            if isinstance(value, dict):
+                # 중첩 딕셔너리는 재귀적으로 변환
+                java_map.put(key, self._dict_to_java_map(value))
+            elif isinstance(value, list):
+                # 리스트는 ArrayList로 변환
+                java_list = self._list_to_java_list(value)
+                java_map.put(key, java_list)
+            else:
+                # 기본 타입은 그대로 추가
+                java_map.put(key, value)
+        
+        return java_map
+    
+    def _list_to_java_list(self, data: List[Any]) -> Any:
+        """
+        Python 리스트를 Java ArrayList로 변환
+        
+        Args:
+            data: Python 리스트
+            
+        Returns:
+            Any: Java ArrayList 객체
+        """
+        java_list = self.gateway.jvm.java.util.ArrayList()
+        
+        for item in data:
+            if isinstance(item, dict):
+                # 딕셔너리는 HashMap으로 변환
+                java_list.add(self._dict_to_java_map(item))
+            elif isinstance(item, list):
+                # 중첩 리스트는 재귀적으로 변환
+                java_list.add(self._list_to_java_list(item))
+            else:
+                # 기본 타입은 그대로 추가
+                java_list.add(item)
+        
+        return java_list
+    
+    def _java_to_python(self, java_obj: Any) -> Dict[str, Any]:
+        """
+        Java 객체를 Python 딕셔너리로 변환
+        
+        Args:
+            java_obj: Java 객체
+            
+        Returns:
+            Dict[str, Any]: Python 딕셔너리
+        """
+        if not java_obj:
+            return {}
+        
+        try:
+            result = {}
+            if hasattr(java_obj, "keySet"):
+                key_set = java_obj.keySet()
+                key_iter = key_set.iterator()
+                
+                while key_iter.hasNext():
+                    key = key_iter.next()
+                    value = java_obj.get(key)
+                    
+                    # 재귀적으로 변환
+                    if hasattr(value, "keySet"):
+                        result[key] = self._java_to_python(value)
+                    elif hasattr(value, "size") and hasattr(value, "get"):
+                        # 배열인 경우
+                        result[key] = [
+                            self._java_to_python(value.get(i)) if hasattr(value.get(i), "keySet")
+                            else value.get(i)
+                            for i in range(value.size())
+                        ]
+                    else:
+                        result[key] = value
+                
+                return result
+            else:
+                # 기본 toString 사용
+                return {"value": str(java_obj)}
+            
+        except Exception as e:
+            logger.error(f"Java 객체 변환 중 오류 발생: {str(e)}", exc_info=True)
+            return {"error": str(e)}
+    
+    def get_tr_code_by_alias(self, alias: str) -> Optional[str]:
+        """
+        별칭에 해당하는 TR 코드를 반환
+        
+        Args:
+            alias: TR 별칭
+            
+        Returns:
+            Optional[str]: TR 코드 또는 None
+        """
+        return self.alias_mapping.get(alias)
     
     def get_cache_ttl(self, tr_code: str) -> int:
         """
-        TR 코드에 대한 캐시 TTL 값을 반환
-        Spring의 getTtlByCode() 메서드에 해당
+        TR 코드에 대한 캐시 TTL(Time-To-Live) 값을 반환
         
         Args:
             tr_code: TR 코드
@@ -302,23 +442,9 @@ class KbsecTr(TrInterface):
         
         return tr.get("ttl", 30)
     
-    def get_tr_code_by_alias(self, alias: str) -> Optional[str]:
-        """
-        별칭에 해당하는 TR 코드를 반환
-        Spring의 getTrCodeByAlias() 메서드에 해당
-        
-        Args:
-            alias: TR 별칭
-            
-        Returns:
-            Optional[str]: TR 코드 또는 None
-        """
-        return self.alias_mapping.get(alias)
-    
     def get_not_evict_tr_codes(self) -> List[str]:
         """
         캐시 삭제 대상에서 제외할 TR 코드 목록을 반환
-        Spring의 getNotEvictTrCodes() 메서드에 해당
         
         Returns:
             List[str]: 캐시 삭제 제외 TR 코드 목록
